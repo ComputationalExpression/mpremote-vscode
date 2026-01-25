@@ -1,16 +1,16 @@
 {
-  "name": "mpremote",
-  "displayName": "MPRemote",
-  "description": "Command palette access for MicroPython mpremote",
+  "name": "uv-mpremote",
+  "displayName": "UV-MPRemote",
+  "description": "Command palette access for MicroPython mpremote with ability to use uv package manager",
   "icon": "images/snake.png",
-  "publisher": "DavesCodeMusings",
+  "publisher": "BareMetal",
   "version": "2.0.0",
   "engines": {
     "vscode": "^1.79.0"
   },
   "repository": {
     "type": "git",
-    "url": "https://github.com/DavesCodeMusings/mpremote-vscode.git"
+    "url": "https://github.com/ComputationalExpression/mpremote-vscode.git"
   },
   "categories": [
     "Other"
