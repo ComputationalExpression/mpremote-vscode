@@ -1,0 +1,30 @@
+name: Grade
+
+on:
+  push:
+    tags:
+      - '*.*.*'
+
+jobs:
+  grade:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v6.0.1
+      with:
+        fetch-depth: '0'
+    - name: Install vsce
+      run: npm install --location=global vsce
+    - name: Install requirements
+      run: npm install
+    - name: Package extension
+      run: |
+        mkdir out
+        vsce package --out out/mpremote-uv.vsix
+    - name: Upload released package
+      id: create-release
+      uses: softprops/action-gh-release@v2
+      with:
+        files: |
+          out/mpremote-uv.vsix
+        token: ${{ secrets.GITHUB_TOKEN }}
+        make_latest: true
