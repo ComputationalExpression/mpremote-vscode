@@ -9,6 +9,11 @@ export class MPRemote {
 
     constructor() {
         // Avoid creating multiple mpremote terminals when session restored.
+        let pwd;
+        if(vscode.workspace.workspaceFolders){
+            pwd = vscode.workspace.workspaceFolders[0].uri.fsPath;
+            childProcess.execSync(`cd ${pwd}`);
+        }
         let existingTerminal = vscode.window.terminals.find(obj => {
             return obj.name === 'mpremote';
         });
@@ -31,6 +36,10 @@ export class MPRemote {
             catch (ex) {
                 vscode.window.showErrorMessage('mpremote is not installed or could not be run as a Python module');
             }
+        }
+        if(vscode.workspace.getConfiguration('mpremote').project.uv){
+            // Return to full uv package manager mode
+            this.mpremote = "uv run mpremote";
         }
     }
 

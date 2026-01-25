@@ -154,6 +154,11 @@
           "type": "string",
           "default": "",
           "description": "If all your MicroPython files are contained in a subdirectory of your project folder (e.g. src), enter that subdirectory name here. This will be used as the local path for uploads to your microcontroller."
+        },
+        "mpremote.project.uv" :{
+          "type": "boolean",
+          "default": false,
+          "description": "Check if this project uses the uv package manager"
         }
       }
     },

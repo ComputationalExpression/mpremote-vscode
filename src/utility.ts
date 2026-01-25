@@ -31,6 +31,12 @@ export function getMPRemoteName() {
                 mpremote = 'python3 -m mpremote';
         }
     }
+    if(vscode.workspace.workspaceFolders && vscode.workspace.getConfiguration('mpremote').project.uv) {
+         let cwd = vscode.workspace.workspaceFolders[0].uri.fsPath;
+         let venv = execSync(`cd ${cwd} && uv python find`);
+         let pwd = String.fromCharCode(...venv).trim().split("/");
+         mpremote = `${pwd} -m mpremote`
+    }
     console.debug('Calling mpremote as:', mpremote);
     return mpremote;
 }
