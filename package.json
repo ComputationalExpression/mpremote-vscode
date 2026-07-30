@@ -4,7 +4,7 @@
   "description": "Command palette access for MicroPython mpremote with ability to use uv package manager",
   "icon": "images/snake.png",
   "publisher": "BareMetal",
-  "version": "2.0.2",
+  "version": "2.1.1",
   "engines": {
     "vscode": "^1.79.0"
   },
