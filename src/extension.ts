@@ -11,432 +11,334 @@ let remoteWorkingDir = new Map();
 remoteWorkingDir.set('default', '/');
 
 export async function activate(context: vscode.ExtensionContext) {
-	let mpremote = new MPRemote();
-	let serialPortDataProvider = new PortListDataProvider();
-	await serialPortDataProvider.refresh();
-	vscode.window.registerTreeDataProvider('serialPortView', serialPortDataProvider);
+    let mpremote = new MPRemote();
+    let serialPortDataProvider = new PortListDataProvider();
+    await serialPortDataProvider.refresh();
+    vscode.window.registerTreeDataProvider('serialPortView', serialPortDataProvider);
 
-	/*
-	 *  Gather file names from the current remote working directory, present the choices
-	 *  via a selection list. Display the contents of the chosen file in the terminal
-	 *  window using MPRemote's cat command.
-	 */
-	context.subscriptions.push(vscode.commands.registerCommand('mpremote.cat', async (args) => {
-		let port: string = '';
-		if (args === undefined || args.label === undefined) {  // picked from command palette instead of context menu
-			port = await getDevicePort(serialPortDataProvider.getPortNames());
-		}
-		else {
-			port = args.label;  // context menu selections send the source of the right-click as a function argument
-		}
-		let cwd = remoteWorkingDir.get(port) || remoteWorkingDir.get('default');
-			getRemoteDirEntries(port, cwd, STAT_MASK_FILE)
-				.then((dirEntries) => {
-					let options = {
-						title: `Choose a file to display from ${port}:${cwd}`,
-						canSelectMany: false,
-						matchOnDetail: true
-					};
-					vscode.window.showQuickPick(dirEntries, options)
-						.then(filename => {
-							console.debug('User selection:', filename);
-							if (filename !== undefined) {  // undefined when user aborts or selection times out
-								let filepath = join(cwd, filename);
-								mpremote.cat(port, filepath);
-							}
-						});
-				})
-				.catch((err) => {
-					vscode.window.showErrorMessage(err);
-				});
-		}));
-	
-	/*
-	 *  Change the remote parent path used for file operations like cp, ls, rm, etc.
-	 *  The parent path is stored per serial port in case there are multiple devices.
-	 */
-	context.subscriptions.push(vscode.commands.registerCommand('mpremote.chdir', async (args) => {
-		let port: string = '';
-		if (args === undefined || args.label === undefined) {  // picked from command palette instead of context menu
-			port = await getDevicePort(serialPortDataProvider.getPortNames());
-		}
-		else {
-			port = args.label;  // context menu selections send the source of the right-click as a function argument
-		}
-		let cwd = remoteWorkingDir.get(port) || remoteWorkingDir.get('default');
-		console.debug('cwd:', cwd);
-		getRemoteDirEntries(port, cwd, STAT_MASK_DIR)
-			.then((subdirs) => {
-				if (cwd !== '/') {
-					subdirs.unshift('..');
-				}
-				let options = {
-					title: `Choose the working directory for ${port}:${cwd}`,
-					canSelectMany: false,
-					matchOnDetail: true
-				};
-				vscode.window.showQuickPick(subdirs, options)
-					.then(choice => {
-						console.debug('User selection:', choice);
-						if (choice !== undefined) {  // undefined when user aborts or selection times out
-							if (choice === '..') {
-								remoteWorkingDir.set(port, cwd.substring(0, cwd.lastIndexOf('/')));
-							}
-							else {
-								remoteWorkingDir.set(port, join(cwd, choice));
-							}
-							console.debug('New remote working directory:', remoteWorkingDir.get(port));
-							mpremote.ls(port, remoteWorkingDir.get(port));
-						}
-					});
-			})
-			.catch((err) => {
-				vscode.window.showErrorMessage(err);
-			});
-	}));
-	
-	/*
-	 *  Trigger a refresh of serial port list that appears in the explorer view.
-	 */
-	context.subscriptions.push(vscode.commands.registerCommand('mpremote.refreshSerialPorts', async () => {
-		await serialPortDataProvider.refresh();
-	}));
+    /**
+     * Helper to resolve a port from context args or the detected port list.
+     * Errors are shown to the user and re-thrown so callers can abort cleanly.
+     */
+    async function resolvePort(args: any): Promise<string> {
+        if (args !== undefined && args.label !== undefined) {  // context menu selection
+            return args.label;
+        }
+        return getDevicePort(serialPortDataProvider.getPortNames());
+    }
 
-	/*
-	 *  Run 'mpremote devs' to show detail about what's attached to the serial ports.
-	 */
-	context.subscriptions.push(vscode.commands.registerCommand('mpremote.devs', () => {
-		 mpremote.listDevs();
-	}));
+    /**
+     * Wrapper that catches errors from commands and surfaces them.
+     */
+    function registerAsyncCommand(command: string, fn: (...args: any[]) => Promise<void>) {
+        context.subscriptions.push(
+            vscode.commands.registerCommand(command, async (...args) => {
+                try {
+                    await fn(...args);
+                }
+                catch (err) {
+                    const message = err instanceof Error ? err.message : String(err);
+                    if (message) {
+                        vscode.window.showErrorMessage(message);
+                    }
+                }
+            })
+        );
+    }
 
-	/*
-	 * Download a file from the microcontroller using 'mpremote cp'.
-	 */
-	context.subscriptions.push(vscode.commands.registerCommand('mpremote.download', async (args) => {
-		let port: string = '';
-		if (args === undefined || args.label === undefined) {
-			port = await getDevicePort(serialPortDataProvider.getPortNames());
-		}
-		else {
-			port = args.label;
-		}
-		let cwd = remoteWorkingDir.get(port) || remoteWorkingDir.get('default');
-		getRemoteDirEntries(port, cwd, STAT_MASK_FILE)
-		.then((dirEntries) => {
-			const options = {
-				title: `Choose file to download from ${port}:${cwd}`,
-				canSelectMany: false,
-				matchOnDetail: true
-			};
-			vscode.window.showQuickPick(dirEntries, options)
-				.then(choice => {
-					console.debug('User selection:', choice);
-					if (choice !== undefined) {
-						const options = {
-							title: 'Choose local destination',
-							canSelectMany: false,
-							openLabel: 'Select Folder',
-							canSelectFiles: false,
-							canSelectFolders: true
-						};
-						vscode.window.showOpenDialog(options)
-							.then(fileUri => {
-								if (fileUri && fileUri[0]) {
-									let localDir = fileUri[0].fsPath;
-									let localPath = pathJoin(localDir, choice);
-									let remotePath = join(cwd, choice);
-									mpremote.download(port, remotePath, localPath);
-								}
-							});
-					}
-				});
-		})
-		.catch((err) => {
-			vscode.window.showErrorMessage(err);
-		});
+    /*
+     *  Gather file names from the current remote working directory, present the choices
+     *  via a selection list. Display the contents of the chosen file in the terminal
+     *  window using MPRemote's cat command.
+     */
+    registerAsyncCommand('mpremote.cat', async (args) => {
+        let port = await resolvePort(args);
+        let cwd = remoteWorkingDir.get(port) || remoteWorkingDir.get('default');
+        const dirEntries = await getRemoteDirEntries(port, cwd, STAT_MASK_FILE);
+        let options = {
+            title: `Choose a file to display from ${port}:${cwd}`,
+            canSelectMany: false,
+            matchOnDetail: true
+        };
+        const filename = await vscode.window.showQuickPick(dirEntries, options);
+        console.debug('User selection:', filename);
+        if (filename !== undefined) {  // undefined when user aborts or selection times out
+            let filepath = join(cwd, filename);
+            mpremote.cat(port, filepath);
+        }
+    });
 
-	}));
+    /*
+     *  Change the remote parent path used for file operations like cp, ls, rm, etc.
+     *  The parent path is stored per serial port in case there are multiple devices.
+     */
+    registerAsyncCommand('mpremote.chdir', async (args) => {
+        let port = await resolvePort(args);
+        let cwd = remoteWorkingDir.get(port) || remoteWorkingDir.get('default');
+        console.debug('cwd:', cwd);
+        const subdirs = await getRemoteDirEntries(port, cwd, STAT_MASK_DIR);
+        if (cwd !== '/') {
+            subdirs.unshift('..');
+        }
+        let options = {
+            title: `Choose the working directory for ${port}:${cwd}`,
+            canSelectMany: false,
+            matchOnDetail: true
+        };
+        const choice = await vscode.window.showQuickPick(subdirs, options);
+        console.debug('User selection:', choice);
+        if (choice !== undefined) {  // undefined when user aborts or selection times out
+            if (choice === '..') {
+                remoteWorkingDir.set(port, cwd.substring(0, cwd.lastIndexOf('/')));
+            }
+            else {
+                remoteWorkingDir.set(port, join(cwd, choice));
+            }
+            console.debug('New remote working directory:', remoteWorkingDir.get(port));
+            mpremote.ls(port, remoteWorkingDir.get(port));
+        }
+    });
 
-	/*
-	 *  Show the device's flash filesystem usage with 'mpremote df'.
-	 */
-	context.subscriptions.push(vscode.commands.registerCommand('mpremote.df', async (args) => {
-		let port: string = '';
-		if (args === undefined || args.label === undefined) {
-			port = await getDevicePort(serialPortDataProvider.getPortNames());
-		}
-		else {
-			port = args.label;
-		}
-		mpremote.df(port);
-	}));
+    /*
+     *  Trigger a refresh of serial port list that appears in the explorer view.
+     */
+    registerAsyncCommand('mpremote.refreshSerialPorts', async () => {
+        await serialPortDataProvider.refresh();
+    });
 
-	/*
-	 *  Run 'mpremote exec to run a python statement on the device.
-	 */
-	context.subscriptions.push(vscode.commands.registerCommand('mpremote.exec', async (args) => {
-		let port: string = '';
-		if (args === undefined || args.label === undefined) {
-			port = await getDevicePort(serialPortDataProvider.getPortNames());
-		}
-		else {
-			port = args.label;
-		}
-		let options = {
-			title: `Python code to run on ${port}`
-		};
-		vscode.window.showInputBox(options)
-			.then((codeString) => {
-				if (codeString) {
-					mpremote.exec(port, codeString);
-				}
-			});
-	}));
+    /*
+     *  Run 'mpremote devs' to show detail about what's attached to the serial ports.
+     */
+    registerAsyncCommand('mpremote.devs', async () => {
+        mpremote.listDevs();
+    });
 
-	/*
-	 *  Run 'mpremote ls' for the device detected from the right-click of the serial port list.
-	 */
-	context.subscriptions.push(vscode.commands.registerCommand('mpremote.ls', async (args) => {
-		let port: string = '';
-		if (args === undefined || args.label === undefined) {
-			port = await getDevicePort(serialPortDataProvider.getPortNames());
-		}
-		else {
-			port = args.label;
-		}
-		let dir = remoteWorkingDir.get(port) || remoteWorkingDir.get('default');
-		mpremote.ls(port, dir);
-    }));
+    /*
+     * Download a file from the microcontroller using 'mpremote cp'.
+     */
+    registerAsyncCommand('mpremote.download', async (args) => {
+        let port = await resolvePort(args);
+        let cwd = remoteWorkingDir.get(port) || remoteWorkingDir.get('default');
+        const dirEntries = await getRemoteDirEntries(port, cwd, STAT_MASK_FILE);
+        const options = {
+            title: `Choose file to download from ${port}:${cwd}`,
+            canSelectMany: false,
+            matchOnDetail: true
+        };
+        const choice = await vscode.window.showQuickPick(dirEntries, options);
+        console.debug('User selection:', choice);
+        if (choice !== undefined) {
+            const dialogOptions = {
+                title: 'Choose local destination',
+                canSelectMany: false,
+                openLabel: 'Select Folder',
+                canSelectFiles: false,
+                canSelectFolders: true
+            };
+            const fileUri = await vscode.window.showOpenDialog(dialogOptions);
+            if (fileUri && fileUri[0]) {
+                let localDir = fileUri[0].fsPath;
+                let localPath = pathJoin(localDir, choice);
+                let remotePath = join(cwd, choice);
+                mpremote.download(port, remotePath, localPath);
+            }
+        }
+    });
 
-	/*
-	 * Prompt for a package name and run 'mpremote mip install' to install it.
-	 */
-	context.subscriptions.push(vscode.commands.registerCommand('mpremote.mipInstall', async (args) => {
-		let port: string = '';
-		if (args === undefined || args.label === undefined) {
-			port = await getDevicePort(serialPortDataProvider.getPortNames());
-		}
-		else {
-			port = args.label;
-		}
+    /*
+     *  Show the device's flash filesystem usage with 'mpremote df'.
+     */
+    registerAsyncCommand('mpremote.df', async (args) => {
+        let port = await resolvePort(args);
+        mpremote.df(port);
+    });
 
+    /*
+     *  Run 'mpremote exec to run a python statement on the device.
+     */
+    registerAsyncCommand('mpremote.exec', async (args) => {
+        let port = await resolvePort(args);
+        let options = {
+            title: `Python code to run on ${port}`
+        };
+        const codeString = await vscode.window.showInputBox(options);
+        if (codeString) {
+            mpremote.exec(port, codeString);
+        }
+    });
+
+    /*
+     *  Run 'mpremote ls' for the device detected from the right-click of the serial port list.
+     */
+    registerAsyncCommand('mpremote.ls', async (args) => {
+        let port = await resolvePort(args);
+        let dir = remoteWorkingDir.get(port) || remoteWorkingDir.get('default');
+        mpremote.ls(port, dir);
+    });
+
+    /*
+     * Prompt for a package name and run 'mpremote mip install' to install it.
+     */
+    registerAsyncCommand('mpremote.mipInstall', async (args) => {
+        let port = await resolvePort(args);
         let options = {
             title: "Enter a package name"
         };
-        vscode.window.showInputBox(options)
-            .then((pkg) => {
-				if (!pkg) {
-					vscode.window.showErrorMessage('You must specify a package name. See: https://docs.micropython.org/en/latest/reference/packages.html#installing-packages-with-mpremote');
-				}
-				else {
-					mpremote.mipInstall(port, pkg as string);
-				}
-			});
-	}));
+        const pkg = await vscode.window.showInputBox(options);
+        if (!pkg) {
+            vscode.window.showErrorMessage('You must specify a package name. See: https://docs.micropython.org/en/latest/reference/packages.html#installing-packages-with-mipremote');
+        }
+        else {
+            mpremote.mipInstall(port, pkg);
+        }
+    });
 
-	/*
-	 *  Create a new directory under the current working directory on the device.
-	 */
-	context.subscriptions.push(vscode.commands.registerCommand('mpremote.mkdir', async (args) => {
-		let port: string = '';
-		if (args === undefined || args.label === undefined) {
-			port = await getDevicePort(serialPortDataProvider.getPortNames());
-		}
-		else {
-			port = args.label;
-		}
-		let cwd = remoteWorkingDir.get(port) || remoteWorkingDir.get('default');
-		let options = {
-			title: `Directory to create under ${port}:${cwd}`
-		};
-		vscode.window.showInputBox(options)
-			.then((newdir) => {
-				if (newdir) {
-				    let dirpath = join(cwd, newdir as string);
-					mpremote.mkdir(port, dirpath);
-				}
-			});
-	}));
+    /*
+     *  Create a new directory under the current working directory on the device.
+     */
+    registerAsyncCommand('mpremote.mkdir', async (args) => {
+        let port = await resolvePort(args);
+        let cwd = remoteWorkingDir.get(port) || remoteWorkingDir.get('default');
+        let options = {
+            title: `Directory to create under ${port}:${cwd}`
+        };
+        const newdir = await vscode.window.showInputBox(options);
+        if (newdir) {
+            let dirpath = join(cwd, newdir);
+            mpremote.mkdir(port, dirpath);
+        }
+    });
 
-	/*
-	 *  Start a REPL prompt in the terminal window for the requested device.
-	 */
-	context.subscriptions.push(vscode.commands.registerCommand('mpremote.repl', async (args) => {
-		let port: string = '';
-		if (args === undefined || args.label === undefined) {
-			port = await getDevicePort(serialPortDataProvider.getPortNames());
-		}
-		else {
-			port = args.label;
-		}
-		mpremote.repl(port);
-	}));
+    /*
+     *  Start a REPL prompt in the terminal window for the requested device.
+     */
+    registerAsyncCommand('mpremote.repl', async (args) => {
+        let port = await resolvePort(args);
+        mpremote.repl(port);
+    });
 
-	/*
-	 * Reset the device.
-	 */
-	context.subscriptions.push(vscode.commands.registerCommand('mpremote.reset', async (args) => {
-		let port: string = '';
-		if (args === undefined || args.label === undefined) {
-			port = await getDevicePort(serialPortDataProvider.getPortNames());
-		}
-		else {
-			port = args.label;
-		}
-		mpremote.reset(port);
-	}));
+    /*
+     * Reset the device.
+     */
+    registerAsyncCommand('mpremote.reset', async (args) => {
+        let port = await resolvePort(args);
+        mpremote.reset(port);
+    });
 
-	/*
-	 * Prompt for a file to remove with respect to the device's current working dir.
-	 */
-	context.subscriptions.push(vscode.commands.registerCommand('mpremote.rm', async (args) => {
-		let port: string = '';
-		if (args === undefined || args.label === undefined) {
-			port = await getDevicePort(serialPortDataProvider.getPortNames());
-		}
-		else {
-			port = args.label;
-		}
-		let cwd = remoteWorkingDir.get(port) || remoteWorkingDir.get('default');
-		getRemoteDirEntries(port, cwd, STAT_MASK_FILE)
-			.then((subdirs) => {
-				let options = {
-					title: `Choose file to remove from ${port}:${cwd}`,
-					canSelectMany: false,
-					matchOnDetail: true
-				};
-				vscode.window.showQuickPick(subdirs, options)
-					.then(choice => {
-						if (choice !== undefined) {  // undefined when user aborts or selection times out
-							let doomedFile = join(cwd, choice);
-							mpremote.rm(port, doomedFile);
-						}
-					});
-			});
-	}));
+    /*
+     * Prompt for a file to remove with respect to the device's current working dir.
+     */
+    registerAsyncCommand('mpremote.rm', async (args) => {
+        let port = await resolvePort(args);
+        let cwd = remoteWorkingDir.get(port) || remoteWorkingDir.get('default');
+        const subdirs = await getRemoteDirEntries(port, cwd, STAT_MASK_FILE);
+        let options = {
+            title: `Choose file to remove from ${port}:${cwd}`,
+            canSelectMany: false,
+            matchOnDetail: true
+        };
+        const choice = await vscode.window.showQuickPick(subdirs, options);
+        if (choice !== undefined) {  // undefined when user aborts or selection times out
+            let doomedFile = join(cwd, choice);
+            mpremote.rm(port, doomedFile);
+        }
+    });
 
-	/*
-	 * Prompt for a directory to remove with respect to the device's current working dir.
-	 */
-	context.subscriptions.push(vscode.commands.registerCommand('mpremote.rmdir', async (args) => {
-		let port: string = '';
-		if (args === undefined || args.label === undefined) {
-			port = await getDevicePort(serialPortDataProvider.getPortNames());
-		}
-		else {
-			port = args.label;
-		}
-		let cwd = remoteWorkingDir.get(port) || remoteWorkingDir.get('default');
-		getRemoteDirEntries(port, cwd, STAT_MASK_DIR)
-			.then((subdirs) => {
-				if (subdirs.length === 0) {
-					vscode.window.showInformationMessage(`No subdirectories to remove under ${cwd}`);
-				}
-				else {
-					let options = {
-						title: `Choose directory to remove from ${port}:${cwd}`,
-						canSelectMany: false,
-						matchOnDetail: true
-					};
-					vscode.window.showQuickPick(subdirs, options)
-						.then(choice => {
-							if (choice !== undefined) {  // undefined when user aborts or selection times out
-								let doomedDirectory = join(cwd, choice);
-								mpremote.rmdir(port, doomedDirectory);
-							}
-						});
-				}
-			});
-	}));
+    /*
+     * Prompt for a directory to remove with respect to the device's current working dir.
+     */
+    registerAsyncCommand('mpremote.rmdir', async (args) => {
+        let port = await resolvePort(args);
+        let cwd = remoteWorkingDir.get(port) || remoteWorkingDir.get('default');
+        const subdirs = await getRemoteDirEntries(port, cwd, STAT_MASK_DIR);
+        if (subdirs.length === 0) {
+            vscode.window.showInformationMessage(`No subdirectories to remove under ${cwd}`);
+        }
+        else {
+            let options = {
+                title: `Choose directory to remove from ${port}:${cwd}`,
+                canSelectMany: false,
+                matchOnDetail: true
+            };
+            const choice = await vscode.window.showQuickPick(subdirs, options);
+            if (choice !== undefined) {  // undefined when user aborts or selection times out
+                let doomedDirectory = join(cwd, choice);
+                mpremote.rmdir(port, doomedDirectory);
+            }
+        }
+    });
 
-	/*
-	 *  Run a file from the local filesystem on the remote device.
-	 */
-	context.subscriptions.push(vscode.commands.registerCommand('mpremote.run', async (args) => {
-		let localPath = getLocalFilePath(args);
-		console.debug('Local file:', localPath);
-		if (localPath) {
-			let port = await getDevicePort(serialPortDataProvider.getPortNames());
-			mpremote.run(port, localPath);
-		}
-	}));
+    /*
+     *  Run a file from the local filesystem on the remote device.
+     */
+    registerAsyncCommand('mpremote.run', async (args) => {
+        let localPath = getLocalFilePath(args);
+        console.debug('Local file:', localPath);
+        if (localPath) {
+            let port = await getDevicePort(serialPortDataProvider.getPortNames());
+            mpremote.run(port, localPath);
+        }
+    });
 
-	/*
-	 *  Set the time and date on the device's realtime clock to match the host system.
-	 */
-	context.subscriptions.push(vscode.commands.registerCommand('mpremote.setrtc', async (args) => {
-		let port: string = '';
-		if (args === undefined || args.label === undefined) {
-			port = await getDevicePort(serialPortDataProvider.getPortNames());
-		}
-		else {
-			port = args.label;
-		}
-		mpremote.setrtc(port);
-	}));
+    /*
+     *  Set the time and date on the device's realtime clock to match the host system.
+     */
+    registerAsyncCommand('mpremote.setrtc', async (args) => {
+        let port = await resolvePort(args);
+        mpremote.setrtc(port);
+    });
 
-	/*
-	 *  Recursively upload all files from the local project directory to the flash filesystem on the device.
-	 */
-	context.subscriptions.push(vscode.commands.registerCommand('mpremote.sync', async (args) => {
-		let port: string = '';
-		if (args === undefined || args.label === undefined) {
-			port = await getDevicePort(serialPortDataProvider.getPortNames());
-		}
-		else {
-			port = args.label;
-		}
-		let localRoot: string = getLocalRoot();
-		if (!localRoot) {
-			vscode.window.showErrorMessage('Unable to determine project root. Open a project folder in the Explorer first.');
-		}
-		else {
-			vscode.window.showInformationMessage(`Overwrite all files on ${port}:/ with local copies from ${localRoot}?`, "OK", "Cancel")
-				.then(confirmation => {
-					if (confirmation === "OK") {
-						mpremote.sync(port, localRoot);					}
-				});
-		}
-	}));
+    /*
+     *  Recursively upload all files from the local project directory to the flash filesystem on the device.
+     */
+    registerAsyncCommand('mpremote.sync', async (args) => {
+        let port = await resolvePort(args);
+        let localRoot: string = getLocalRoot();
+        if (!localRoot) {
+            vscode.window.showErrorMessage('Unable to determine project root. Open a project folder in the Explorer first.');
+        }
+        else {
+            const confirmation = await vscode.window.showInformationMessage(
+                `Overwrite all files on ${port}:/ with local copies from ${localRoot}?`,
+                "OK",
+                "Cancel"
+            );
+            if (confirmation === "OK") {
+                mpremote.sync(port, localRoot);
+            }
+        }
+    });
 
-	/*
-	 *  Upload a local file into the microcontroller's current working dir.
-	 */
-	context.subscriptions.push(vscode.commands.registerCommand('mpremote.upload', async (args) => {
-		let localPath: string = getLocalFilePath(args);
-		console.debug('Local file:', localPath);
+    /*
+     *  Upload a local file into the microcontroller's current working dir.
+     */
+    registerAsyncCommand('mpremote.upload', async (args) => {
+        let localPath: string = getLocalFilePath(args);
+        console.debug('Local file:', localPath);
 
-		if (localPath) {
-			let port = await getDevicePort(serialPortDataProvider.getPortNames());
-			console.debug('Local file:', localPath);
-			let localRoot: string = getLocalRoot();
-			let cwd: string = remoteWorkingDir.get(port) || remoteWorkingDir.get('default');
-			let remotePath: string = "";
-			if (localRoot) {
-				remotePath = pathJoin(cwd, localPath.replace(localRoot, "")).replace(/\\/g, "/");
-			}
-			else {
-				remotePath = pathJoin(cwd, pathBasename(localPath)).replace(/\\/g, "/");
-			}
-			console.debug('Remote file:', remotePath);
-			mpremote.upload(port, localPath, remotePath);
-		}
-	}));
+        if (localPath) {
+            let port = await getDevicePort(serialPortDataProvider.getPortNames());
+            let localRoot: string = getLocalRoot();
+            let cwd: string = remoteWorkingDir.get(port) || remoteWorkingDir.get('default');
+            let remotePath: string = "";
+            if (localRoot) {
+                remotePath = pathJoin(cwd, localPath.replace(localRoot, "")).replace(/\\/g, "/");
+            }
+            else {
+                remotePath = pathJoin(cwd, pathBasename(localPath)).replace(/\\/g, "/");
+            }
+            console.debug('Remote file:', remotePath);
+            mpremote.upload(port, localPath, remotePath);
+        }
+    });
 
-	/*
-	 *  Get the version number of the device's MicroPython firmware.
-	 */
-	context.subscriptions.push(vscode.commands.registerCommand('mpremote.version', async (args) => {
-		let port: string = '';
-		if (args === undefined || args.label === undefined) {
-			port = await getDevicePort(serialPortDataProvider.getPortNames());
-		}
-		else {
-			port = args.label;
-		}
-		mpremote.version(port);
-	}));
-
+    /*
+     *  Get the version number of the device's MicroPython firmware.
+     */
+    registerAsyncCommand('mpremote.version', async (args) => {
+        let port = await resolvePort(args);
+        mpremote.version(port);
+    });
 }
 
 

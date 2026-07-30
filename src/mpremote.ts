@@ -1,171 +1,152 @@
 import * as vscode from 'vscode';
-import * as childProcess from 'child_process';
-import { readdir } from 'fs';
-import { getMPRemoteName, SYNC_IGNORE } from './utility';
+import { promises as fs } from 'fs';
+import { join as pathJoin } from 'path';
+import { sendMPRemoteToTerminal } from './executor';
+import { SYNC_IGNORE } from './utility';
 
 export class MPRemote {
-    terminal;
-    mpremote = getMPRemoteName();
+    terminal: vscode.Terminal;
 
     constructor() {
-        // Avoid creating multiple mpremote terminals when session restored.
-        let pwd;
-        if(vscode.workspace.workspaceFolders){
-            pwd = vscode.workspace.workspaceFolders[0].uri.fsPath;
-            childProcess.execSync(`cd ${pwd}`);
-        }
-        let existingTerminal = vscode.window.terminals.find(obj => {
-            return obj.name === 'mpremote';
-        });
+        const cwd = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+        const existingTerminal = vscode.window.terminals.find(t => t.name === 'mpremote');
         if (existingTerminal) {
             console.debug('Reusing existing mpremote terminal.');
             this.terminal = existingTerminal;
         }
         else {
             console.debug('Creating new mpremote terminal.');
-            this.terminal = vscode.window.createTerminal('mpremote');
+            this.terminal = vscode.window.createTerminal({ name: 'mpremote', cwd });
             this.terminal.show(false);  // false here lets the mpremote terminal take focus on startup
         }
+    }
 
-        if (vscode.workspace.getConfiguration('mpremote').startupCheck.skip === false) {
-            // Python and the mpremote module must be installed for this to work.
-            try {
-                let mpremoteVersion = childProcess.execSync(`${this.mpremote} version`).toString().split('\r\n')[0].split(' ')[1];
-                console.debug('mpremote version:', mpremoteVersion);
-            }
-            catch (ex) {
-                vscode.window.showErrorMessage('mpremote is not installed or could not be run as a Python module');
-            }
-        }
-        if(vscode.workspace.getConfiguration('mpremote').project.uv){
-            // Return to full uv package manager mode
-            this.mpremote = "uv run mpremote";
-        }
+    private send(args: string[]): void {
+        sendMPRemoteToTerminal(this.terminal, args).catch(err => {
+            console.error('Failed to send mpremote command:', err);
+            vscode.window.showErrorMessage(`mpremote command failed: ${err}`);
+        });
     }
 
     cat(port: string, filePath: string) {
         if (port) {
-            this.terminal.sendText(`${this.mpremote} connect ${port} cat '${filePath}'`);
+            this.send(['connect', port, 'cat', filePath]);
         }
     }
 
     df(port: string) {
         if (port) {
-            this.terminal.sendText(`${this.mpremote} connect ${port} df`);
+            this.send(['connect', port, 'df']);
         }
     }
 
     download(port: string, remotePath: string, localPath: string) {
         if (port) {
-            this.terminal.sendText(`${this.mpremote} connect ${port} cp ':${remotePath}' '${localPath}'`);
+            this.send(['connect', port, 'cp', ':' + remotePath, localPath]);
         }
     }
 
     exec(port: string, codeString: string) {
         if (port) {
-            this.terminal.sendText(`${this.mpremote} connect ${port} exec '${codeString}'`);
+            this.send(['connect', port, 'exec', codeString]);
         }
     }
 
     listDevs() {
-        this.terminal.sendText(`${this.mpremote} devs`);
+        this.send(['devs']);
     }
 
     ls(port: string, dir: string) {
         if (port) {
-            this.terminal.sendText(`${this.mpremote} connect ${port} fs ls '${dir}'`);
+            this.send(['connect', port, 'fs', 'ls', dir]);
         }
     }
 
     mipInstall(port: string, pkg: string) {
         if (port && pkg) {
-            this.terminal.sendText(`${this.mpremote} connect ${port} mip install ${pkg}`);
+            this.send(['connect', port, 'mip', 'install', pkg]);
         }
     }
 
     mkdir(port: string, dirPath: string) {
         if (port) {
-            this.terminal.sendText(`${this.mpremote} connect ${port} fs mkdir '${dirPath}'`);
+            this.send(['connect', port, 'fs', 'mkdir', dirPath]);
         }
     }
 
     repl(port: string) {
         if (port) {
-            this.terminal.sendText(`${this.mpremote} connect ${port} repl`);
+            this.send(['connect', port, 'repl']);
         }
     }
 
     reset(port: string) {
         if (port) {
-            this.terminal.sendText(`${this.mpremote} connect ${port} reset`);
+            this.send(['connect', port, 'reset']);
         }
     }
 
     rm(port: string, filePath: string) {
         if (port && filePath) {
-            this.terminal.sendText(`${this.mpremote} connect ${port} fs rm ':${filePath}'`);
+            this.send(['connect', port, 'fs', 'rm', ':' + filePath]);
         }
     }
 
     rmdir(port: string, dirPath: string) {
         if (port && dirPath) {
-            this.terminal.sendText(`${this.mpremote} connect ${port} fs rmdir ':${dirPath}'`);
+            this.send(['connect', port, 'fs', 'rmdir', ':' + dirPath]);
         }
     }
 
     run(port: string, filePath: string) {
         if (port && filePath) {
-            this.terminal.sendText(`${this.mpremote} connect ${port} run '${filePath}'`);
+            this.send(['connect', port, 'run', filePath]);
         }
     }
 
     setrtc(port: string) {
         if (port) {
-            this.terminal.sendText(`${this.mpremote} connect ${port} rtc --set`);
+            this.send(['connect', port, 'rtc', '--set']);
         }
     }
 
     sync(port: string, localRoot: string) {
         if (port && localRoot) {
             console.debug("Sync it up, Kris! I'm about to.");
-            this.terminal.sendText(`cd '${localRoot}'`);
-            readdir(localRoot, { withFileTypes: true }, (err, entries) => {
-                if (err) {
-                    console.error(err);
-                    vscode.window.showErrorMessage('Unable to read directory.');
-                }
-                else {
-                    console.debug('Directory entries found:', entries.length);
-                    this.terminal.sendText(`cd '${localRoot}'`);
-                    entries.forEach(entry => {
-                        console.debug('Examining directory entry:', entry);
+            fs.readdir(localRoot, { withFileTypes: true })
+                .then(entries => {
+                    for (const entry of entries) {
+                        if (SYNC_IGNORE.includes(entry.name)) {
+                            console.debug('Skipping directory:', entry.name);
+                            continue;
+                        }
+                        const localPath = pathJoin(localRoot, entry.name);
                         if (entry.isDirectory()) {
-                            if (SYNC_IGNORE.includes(entry.name)) {
-                                console.debug('Skipping directory:', entry.name);
-                            }
-                            else {
-                                console.debug(`${this.mpremote} connect ${port} fs cp -r '${entry.name}' :`);
-                                this.terminal.sendText(`${this.mpremote} connect ${port} fs cp -r '${entry.name}' :`);
-                            }
+                            console.debug('mpremote connect', port, 'fs cp -r', localPath, ':');
+                            this.send(['connect', port, 'fs', 'cp', '-r', localPath, ':']);
                         }
                         else {
-                            console.debug(`${this.mpremote} connect ${port} fs cp '${entry.name}' :`);
-                            this.terminal.sendText(`${this.mpremote} connect ${port} fs cp '${entry.name}' :`);                        }
-                    });
-                }
-            });
+                            console.debug('mpremote connect', port, 'fs cp', localPath, ':');
+                            this.send(['connect', port, 'fs', 'cp', localPath, ':']);
+                        }
+                    }
+                })
+                .catch(err => {
+                    console.error(err);
+                    vscode.window.showErrorMessage('Unable to read project directory for sync.');
+                });
         }
     }
 
     upload(port: string, localPath: string, remotePath: string) {
         if (port && localPath && remotePath) {
-            this.terminal.sendText(`${this.mpremote} connect ${port} cp '${localPath}' ':${remotePath}'`);
+            this.send(['connect', port, 'cp', localPath, ':' + remotePath]);
         }
     }
 
     version(port: string) {
         if (port) {
-            this.terminal.sendText(`${this.mpremote} connect ${port} exec 'from sys import version; print(version)'`);
+            this.send(['connect', port, 'exec', 'from sys import version; print(version)']);
         }
     }
 }

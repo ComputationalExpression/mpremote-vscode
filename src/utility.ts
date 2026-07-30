@@ -1,6 +1,6 @@
 import * as vscode from 'vscode';
 import { join as pathJoin } from 'path';
-import { exec, execSync } from 'child_process';
+import { execMPRemote } from './executor';
 
 export const STAT_MASK_DIR = 0x4000;
 export const STAT_MASK_FILE = 0x8000;
@@ -10,36 +10,6 @@ export const SYNC_IGNORE = [
     '.git',  // when using git source control
     '__pycache__'  // when code is run in VS Code Python
 ];
-
-/**
- *  Look up the user configured way of calling mpremote for the system. If
- *  not explicitly configured, make an educated guess based on the operating
- *  system.
- */
-export function getMPRemoteName() {
-    let mpremote = vscode.workspace.getConfiguration('mpremote').command;
-    if (!mpremote) {
-        switch (process.platform) {
-            case 'win32':  // win32 is returned for 64-bit OS as well
-                mpremote = 'py.exe -m mpremote';
-                break;
-            case 'linux':
-            case 'darwin':
-                mpremote = 'mpremote';
-                break;
-            default:
-                mpremote = 'python3 -m mpremote';
-        }
-    }
-    if(vscode.workspace.workspaceFolders && vscode.workspace.getConfiguration('mpremote').project.uv) {
-         let cwd = vscode.workspace.workspaceFolders[0].uri.fsPath;
-         let venv = execSync(`cd ${cwd} && uv python find`);
-         let pwd = String.fromCharCode(...venv).trim().split("/");
-         mpremote = `${pwd.join("/")} -m mpremote`
-    }
-    console.debug('Calling mpremote as:', mpremote);
-    return mpremote;
-}
 
 /**
  * Join file path components using forward slash separator. Because the Windows
@@ -60,63 +30,22 @@ export function join(...args: string[]) {
 
 /**
  * Return a JSON formatted list of entries in remote (device) directory. Can be
- * limited to just directories (STAT_MASK_DIR) or just files (STAT_MASK_FILES)
+ * limited to just directories (STAT_MASK_DIR) or just files (STAT_MASK_FILES).
  */
 export async function getRemoteDirEntries(port: string, dir: string, mask = STAT_MASK_ALL): Promise<string[]> {
-    let mpremote = getMPRemoteName();
-    let cwd = dir;
-    console.debug('Gathering directory entries for', cwd, 'on device at', port);
-    return new Promise((resolve, reject) => {
-        let oneLiner = `from os import listdir, stat ; print([entry for entry in listdir('${cwd}') if stat('${cwd}' + '/' + entry)[0] & ${mask} != 0])`;
-        let listDirCmd = `${mpremote} connect ${port} exec "${oneLiner}"`;
-        console.debug(`Running ${listDirCmd}`);
-        exec(listDirCmd, (err, output) => {
-            if (err) {
-                console.error(err);
-            }
-            else {
-                console.debug('Files found:\n', output);
-                try {
-                    let dirEntries = JSON.parse(`${output.replace(/'/g, '"')}`);  // Python uses single quote, JSON parser expects double quote.
-                    resolve(dirEntries);
-                }
-                catch (ex) {
-                    console.error('Parsing Python listdir() output failed.', ex);
-                    reject('Parsing directory entries failed.');
-                }
-            }
-        });
-    });
-}
-
-/**
- * Return an array containing serial ports detected by mpremote. Array
- * elements are objects, similar to what is returned by the JavaScript
- * SerialPort library. This function should serve as a drop-in replacement.
- * The path property will be something like: '/dev/ttyS0' for Linux or
- * 'COM3' for Windows. The rest of the info is included for completeness,
- * but not used by this extension.
- */
-export function getSerialPortList() {
-    interface SerialPort {
-        path: string,
-        serialNumber: string,
-        pnpId: string,
-        manufacturer: string,
-        product: string
+    const escapedDir = dir.replace(/'/g, "\\'");
+    const oneLiner = `from os import listdir, stat ; print([entry for entry in listdir('${escapedDir}') if stat('${escapedDir}' + '/' + entry)[0] & ${mask} != 0])`;
+    console.debug('Gathering directory entries for', dir, 'on device at', port);
+    const output = await execMPRemote(['connect', port, 'exec', oneLiner], { timeout: 15000 });
+    console.debug('Files found:\n', output);
+    try {
+        const dirEntries = JSON.parse(output.replace(/'/g, '"'));  // Python uses single quote, JSON parser expects double quote.
+        return dirEntries;
     }
-    let ports: SerialPort[] = [];
-    let mpremote = getMPRemoteName();
-    let devsOutput = execSync(`${mpremote} devs`).toString().split(/\r?\n/);
-    devsOutput.forEach(line => {
-        if (line) {
-            let [path, serialNumber, pnpId, manufacturer, product] = line.split(" ");
-            if (path) {
-                ports.push({path: path, serialNumber: serialNumber, pnpId: pnpId, manufacturer: manufacturer, product: product});
-            }
-        }
-    });
-    return ports;
+    catch (ex) {
+        console.error('Parsing Python listdir() output failed.', ex);
+        throw new Error('Parsing directory entries failed.');
+    }
 }
 
 /**
@@ -129,28 +58,22 @@ export async function getDevicePort(portList: string[]): Promise<string> {
         canSelectMany: false,
         matchOnDetail: true
     };
-    return new Promise((resolve, reject) => {
-        if (portList.length === 0) {
-            console.debug('No device found on any port.');
-            reject('No device detected.');
+    if (portList.length === 0) {
+        console.debug('No device found on any port.');
+        throw new Error('No device detected.');
+    }
+    else if (portList.length === 1) {
+        console.debug('Using device on port:', portList[0]);
+        return portList[0];
+    }
+    else {
+        const choice = await vscode.window.showQuickPick(portList, options);
+        if (choice === undefined) {
+            throw new Error('No device selected.');
         }
-        else if (portList.length === 1) {
-            console.debug('Using device on port:', portList[0]);
-            resolve(portList[0]);
-        }
-        else {
-            vscode.window.showQuickPick(portList, options)
-                .then(choice => {
-                    if (choice !== undefined) {
-                        console.debug('Using device on port:', choice);
-                        resolve(choice);
-                    }
-                    else {
-                        reject(undefined);
-                    }
-                });
-        }
-    });
+        console.debug('Using device on port:', choice);
+        return choice;
+    }
 }
 
 /**
@@ -180,7 +103,7 @@ export function getLocalFilePath(args: any) {
 }
 
 /**
- *  Try to determine the project files root dirctory using the currently
+ *  Try to determine the project files root directory using the currently
  *  open folder in VS Code's Explorer. If there is no open folder, return
  *  an empty string.
  */

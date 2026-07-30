@@ -1,8 +1,8 @@
 import * as vscode from 'vscode';
-import { getSerialPortList } from './utility';
+import { detectMicroPythonDevices, DetectedDevice } from './deviceDetection';
 
 class TreeItem extends vscode.TreeItem {
-  children: TreeItem[] | undefined;
+    children: TreeItem[] | undefined;
 }
 
 export class PortListDataProvider implements vscode.TreeDataProvider<TreeItem> {
@@ -14,21 +14,26 @@ export class PortListDataProvider implements vscode.TreeDataProvider<TreeItem> {
 
     // Enable updates to tree view whenever items change (e.g. rescanning after plugging in a new microcontroller)
     private _onDidChangeTreeData: vscode.EventEmitter<TreeItem | undefined> = new vscode.EventEmitter<TreeItem | undefined>();
-	readonly onDidChangeTreeData: vscode.Event<TreeItem | undefined> = this._onDidChangeTreeData.event;
+    readonly onDidChangeTreeData: vscode.Event<TreeItem | undefined> = this._onDidChangeTreeData.event;
 
     // Always call refresh() immediately after creating an instance of PortListDataProvider to populate the list of available ports.
     async refresh() {
-        let comPortList = getSerialPortList();
-        let comPortSkipList = vscode.workspace.getConfiguration('mpremote').serialPort.skip.replace(/\s/g, '').split(',');
-        console.debug('Detected serial ports:', comPortList);
-        console.debug('Serial port skip list:', comPortSkipList);
-        this.portList = [];
-        comPortList.forEach(port => {
-            if (!comPortSkipList.includes(port.path)) {
-                this.portList.push(new TreeItem(port.path));
-            }
-        });
-        console.debug('Avaiable serial ports:', this.portList);
+        try {
+            const devices = await detectMicroPythonDevices(this.getWorkspaceRoot());
+            console.debug('Detected MicroPython devices:', devices);
+            this.portList = devices.map(device => {
+                const item = new TreeItem(device.path);
+                item.tooltip = this.buildTooltip(device);
+                return item;
+            });
+            this.setHasDeviceContext(devices.length > 0);
+        }
+        catch (err) {
+            console.error('Failed to refresh serial port list:', err);
+            this.portList = [];
+            this.setHasDeviceContext(false);
+            vscode.window.showWarningMessage(`MicroPython device detection failed: ${err}`);
+        }
         this._onDidChangeTreeData.fire(undefined);
     }
 
@@ -41,10 +46,27 @@ export class PortListDataProvider implements vscode.TreeDataProvider<TreeItem> {
     }
 
     getPortNames(): string[] {
-        let ports: string[] = [];
-        this.portList.forEach(port => {
-            ports.push(port.label as string);
-        });
-        return ports;
+        return this.portList.map(port => port.label as string);
+    }
+
+    private buildTooltip(device: DetectedDevice): string {
+        const parts = [
+            `Port: ${device.path}`,
+            device.manufacturer ? `Manufacturer: ${device.manufacturer}` : '',
+            device.product ? `Product: ${device.product}` : '',
+            device.serialNumber ? `Serial: ${device.serialNumber}` : ''
+        ];
+        return parts.filter(Boolean).join('\n');
+    }
+
+    private setHasDeviceContext(value: boolean): void {
+        vscode.commands.executeCommand('setContext', 'mpremote:hasDevice', value);
+    }
+
+    private getWorkspaceRoot(): string | undefined {
+        if (vscode.workspace.workspaceFolders && vscode.workspace.workspaceFolders.length > 0) {
+            return vscode.workspace.workspaceFolders[0].uri.fsPath;
+        }
+        return undefined;
     }
 }

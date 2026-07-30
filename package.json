@@ -15,7 +15,14 @@
   "categories": [
     "Other"
   ],
-  "activationEvents": [],
+  "activationEvents": [
+    "onCommand:mpremote.run",
+    "onCommand:mpremote.upload",
+    "onCommand:mpremote.sync",
+    "onCommand:mpremote.refreshSerialPorts",
+    "onCommand:mpremote.devs",
+    "onView:serialPortView"
+  ],
   "main": "./out/extension.js",
   "contributes": {
     "commands": [
@@ -155,10 +162,20 @@
           "default": "",
           "description": "If all your MicroPython files are contained in a subdirectory of your project folder (e.g. src), enter that subdirectory name here. This will be used as the local path for uploads to your microcontroller."
         },
-        "mpremote.project.uv" :{
+        "mpremote.project.uv": {
           "type": "boolean",
           "default": false,
           "description": "Check if this project uses the uv package manager"
+        },
+        "mpremote.detect.probe": {
+          "type": "boolean",
+          "default": true,
+          "description": "Probe candidate serial ports to confirm they run MicroPython. Disabling makes detection faster but less reliable."
+        },
+        "mpremote.detect.probeTimeout": {
+          "type": "number",
+          "default": 1500,
+          "description": "Milliseconds to wait for each port probe to respond."
         }
       }
     },
@@ -190,7 +207,7 @@
         {
           "command": "mpremote.run",
           "group": "navigation",
-          "when": "resourceExtname == .mpy || resourceExtname == .py || resourceLangId == python"
+          "when": "mpremote:hasDevice && (resourceExtname == .mpy || resourceExtname == .py || resourceLangId == python)"
         }
       ],
       "explorer/context": [
